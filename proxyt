@@ -1,0 +1,365 @@
+#!/usr/bin/env node
+/**
+ * TCP proxy CLI with optional TLS support in pure Node.js
+ *
+ * Author: Dave Eddy <dave@daveeddy.com>
+ * Date: March 10, 2017
+ * License: MIT
+ */
+
+var dns = require('dns');
+var fs = require('fs');
+var net = require('net');
+var tls = require('tls');
+var util = require('util');
+var f = util.format;
+
+var BasicCache = require('basiccache');
+var bunyan = require('bunyan');
+var getopt = require('posix-getopt');
+var prettyBytes = require('pretty-bytes');
+var vasync = require('vasync');
+
+var assert = require('assert-plus');
+var hrtime = require('./lib/hrtime');
+
+var package = require('./package');
+
+// bunyan logger
+var log = bunyan.createLogger({
+    name: package.name
+});
+
+// number of active connections
+var connected = 0;
+
+// TLS secure context
+var secureContext;
+
+// TCP server
+var server;
+
+// CLI Options
+var interval;
+var key;
+var cert;
+var reverseDNS = true;
+var SNIHost;
+var source;
+var target;
+
+// DNS cache
+var dnsCache = new BasicCache({
+    expires: 1 * 60 * 60 * 1000,           // expire records after an hour
+    purgeInterval: 1 * 24 * 60 * 60 * 1000 // purge records every day
+});
+
+// vasync queue to resolve IP addresses
+var dnsq = vasync.queue(function (ip, cb) {
+    var name = dnsCache.get(ip);
+
+    // if we already have the name cached we can return early
+    if (name) {
+        cb();
+        return;
+    }
+
+    log.debug({ip: ip}, 'looking up DNS record for ip %s', ip);
+    dns.reverse(ip, function (err, names) {
+        if (err) {
+            log.debug(err, 'failed to find DNS record for ip %s', ip);
+            cb();
+            return;
+        }
+
+        // cache the value
+        assert.arrayOfString(names, 'names');
+        name = names[0] || 'unknown';
+        log.debug({ip: ip, name: name}, 'DNS record for ip %s: %s', ip, name);
+        dnsCache.set(ip, name);
+        cb();
+    });
+}, 5);
+
+/*
+ * return the usage message as a string
+ */
+function usage() {
+    return [
+        f('Usage: %s [options] <listen> <target>', package.name),
+        '',
+        'Example:',
+        '',
+        '  Listen on all interfaces on port 80 (locally) and forward',
+        '  incoming requests to 10.0.1.234 on port 8080',
+        '',
+        '    $ proxyt 0.0.0.0:80 10.0.1.234:8080',
+        '',
+        '  Listen locally via TLS on port 443 (locally) and forward incoming',
+        '  requests to 1.2.3.4 on port 5678',
+        '',
+        '    $ proxyt -k pem.key -c pem.cert 127.0.0.1:443 1.2.3.4:5678',
+        '',
+        'Options:',
+        '',
+        '  -c, --cert <cert>       certificate file to use (must be specified with -k)',
+        '  -H, --sni-host <host>   SNI Hostname (optional), connections that do not match will be dropped',
+        '  -h, --help              print this message and exit',
+        '  -i, --interval <secs>   interval in seconds to reload TLS key and cert, defaults to none',
+        '  -k, --key <key>         key file to use (must be specified with -c)',
+        '  -l, --log-level <lvl>   bunyan log level to use, defaults to info',
+        '  -n, --no-dns            do not attempt to resolve IP addresses',
+        '  -v, --version           print the version number and exit',
+        '',
+    ].join('\n');
+}
+
+/*
+ * Print the usage message and exit
+ */
+function usageError() {
+    console.error.apply(console, arguments);
+    console.error();
+    console.error(usage());
+    process.exit(2);
+}
+
+/*
+ * Convert a string like "1.2.3.4:678" to
+ * {
+ *   host: "1.2.3.4",
+ *   port: 678
+ * }
+ */
+function extractHostAndPort(s, name) {
+    if (!s) {
+        usageError('%s argument must be specified', name);
+    }
+
+    assert.string(s, 's');
+    var _s = s.split(':');
+    var host = _s[0];
+    var port = parseInt(_s[1], 10);
+
+    if (!host || isNaN(port)) {
+        usageError('cannot extract host and port from "%s"', s);
+    }
+
+    return {
+        host: host,
+        port: port
+    };
+}
+
+/*
+ * Called when a TLS connection is created
+ */
+function sniCallback(servername, cb) {
+    log.trace('SNI Callback: %j', servername);
+    var err;
+
+    if (SNIHost && SNIHost !== servername) {
+        err = new Error('invalid SNI host');
+        log.warn({want: SNIHost, given: servername}, err.message);
+        cb(err);
+        return;
+    }
+
+    cb(null, secureContext);
+}
+
+/*
+ * Start the server
+ */
+function start() {
+    server.listen(source.port, source.host, onListening);
+}
+
+/*
+ * When the server is listening
+ */
+function onListening() {
+    log.info('Listening on tcp://%s:%d, forwarding to tcp://%s:%d',
+        source.host, source.port, target.host, target.port);
+}
+
+/*
+ * Read the cert and key files
+ */
+function createSecureContext(cb) {
+    assert.string(cert, 'cert');
+    assert.string(key, 'key');
+    assert.optionalFunc(cb, 'cb');
+
+    var inputs = [
+        {name: 'cert', file: cert},
+        {name: 'key', file: key}
+    ];
+
+    log.trace({inputs: inputs}, '(re)loading TLS data');
+
+    var data = {};
+    vasync.forEachPipeline({
+        inputs: inputs,
+        func: function (o, cb2) {
+            fs.readFile(o.file, 'utf8', function (err, txt) {
+                if (err) {
+                    cb2(err);
+                    return;
+                }
+
+                data[o.name] = txt;
+
+                cb2();
+            });
+        }
+    }, function (err, results) {
+        if (interval) {
+            setTimeout(createSecureContext, interval * 1000);
+        }
+
+        if (err) {
+            log.warn(err, 'failed to read TLS data');
+            if (cb) {
+                cb(err);
+            }
+            return;
+        }
+
+        assert.string(data.cert, 'data.cert');
+        assert.string(data.key, 'data.key');
+
+        secureContext = tls.createSecureContext({
+            cert: data.cert,
+            key: data.key
+        });
+
+        log.debug({cert: cert, key: key}, '(re)loaded TLS data');
+
+        if (cb) {
+            cb();
+        }
+    });
+}
+
+/*
+ * Called when a new connection is made
+ */
+function onconnection(sc) {
+    var ip = sc.remoteAddress;
+    var started = process.hrtime();
+    var rec_bytes = 0;
+    var sent_bytes = 0;
+
+    if (reverseDNS) {
+        dnsq.push(ip);
+    }
+
+    log.debug('(%d) New Connection %s', ++connected, ip);
+
+    var tc = net.connect(target.port, target.host, function () {
+        sc.pipe(tc);
+        tc.pipe(sc);
+
+        sc.on('data', function (data) {
+            rec_bytes += data.length;
+        });
+        tc.on('data', function (data) {
+            sent_bytes += data.length;
+        });
+    });
+
+    tc.on('error', function (err) {
+        log.warn('(%d) Target error for %s -> %s:%d: %s',
+            connected, ip, target.host, target.port, err.message);
+    });
+
+    tc.on('close', function () {
+        log.debug('(%d) Target close for %s -> %s:%d',
+            connected, ip, target.host, target.port);
+        sc.end();
+        sc.destroy();
+    });
+
+    sc.on('error', function (err) {
+        log.warn('(%d) Socket error for %s: %s', connected, ip, err.message);
+    });
+
+    sc.on('close', function () {
+        log.info('(%d) Connection closed %s (%s) - lasted %s recv %s sent %s',
+            --connected, ip, dnsCache.get(ip) || 'unknown',
+            hrtime.prettyHrtime(process.hrtime(started)),
+            prettyBytes(rec_bytes),
+            prettyBytes(sent_bytes));
+        tc.end();
+    });
+}
+
+// command line arguments
+var options = [
+    'c:(cert)',
+    'H:(sni-host)',
+    'h(help)',
+    'i:(interval)',
+    'k:(key)',
+    'l:(log-level)',
+    'n(no-dns)',
+    'v(version)'
+].join('');
+var parser = new getopt.BasicParser(options, process.argv);
+
+var serverOpts = {};
+var option;
+while ((option = parser.getopt()) !== undefined) {
+    switch (option.option) {
+    case 'c': cert = option.optarg; break;
+    case 'H': SNIHost = option.optarg; break;
+    case 'h': console.log(usage()); process.exit(0);
+    case 'i': interval = parseInt(option.optarg, 10); assert.number(interval); break;
+    case 'k': key = option.optarg; break;
+    case 'l': log.level(option.optarg); break;
+    case 'n': reverseDNS = false; break;
+    case 'v': console.log(package.version); process.exit(0);
+    default: console.error(usage()); process.exit(1); break;
+    }
+}
+var args = process.argv.slice(parser.optind());
+source = extractHostAndPort(args[0], 'source');
+target = extractHostAndPort(args[1], 'target');
+
+// -k and -c must both be specified or none specified
+if ((cert && !key) || (!cert && key)) {
+    usageError('-k and -c must be specified together');
+}
+
+var useTLS = !!(cert && key);
+var server;
+
+if (!useTLS && interval) {
+    usageError('-i must be specified with -c and -k');
+}
+if (!useTLS && SNIHost) {
+    usageError('-H must be specified with -c and -k');
+}
+
+log.info({
+    useTLS: useTLS,
+    cert: cert,
+    key: key,
+    SNIHost: SNIHost,
+    interval: interval,
+    reverseDNS: reverseDNS
+}, 'config ready');
+
+if (useTLS) {
+    serverOpts.SNICallback = sniCallback;
+    createSecureContext(function (err) {
+        assert.ifError(err, 'err');
+
+        server = tls.createServer(serverOpts, onconnection);
+        start();
+    });
+} else {
+    server = net.createServer(serverOpts, onconnection);
+    start();
+}

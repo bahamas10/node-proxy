@@ -1,0 +1,30 @@
+{
+  "name": "proxyt",
+  "version": "1.0.0",
+  "description": "TCP proxy CLI with optional TLS support in pure Node.JS",
+  "preferGlobal": true,
+  "bin": {
+    "proxyt": "./proxyt"
+  },
+  "directories": {
+    "lib": "lib"
+  },
+  "dependencies": {
+    "basiccache": "^0.1.0",
+    "bunyan": "^1.8.12",
+    "posix-getopt": "^1.2.0",
+    "pretty-bytes": "^5.3.0",
+    "vasync": "^2.2.0"
+  },
+  "devDependencies": {},
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "proxy",
+    "tls",
+    "ssl"
+  ],
+  "author": "Dave Eddy <dave@daveeddy.com>",
+  "license": "MIT"
+}
