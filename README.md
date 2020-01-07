@@ -1,5 +1,5 @@
-proxy
-=====
+proxyt
+======
 
 TCP proxy CLI with optional TLS support in pure Node.JS
 
