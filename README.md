@@ -19,6 +19,11 @@ interval.
 
 All logging is done via [Bunyan](https://github.com/trentm/node-bunyan).
 
+Install
+-------
+
+    npm install -g proxyt
+
 Examples
 --------
 
