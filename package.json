@@ -10,6 +10,7 @@
     "lib": "lib"
   },
   "dependencies": {
+    "assert-plus": "^1.0.0",
     "basiccache": "^0.1.0",
     "bunyan": "^1.8.12",
     "posix-getopt": "^1.2.0",
