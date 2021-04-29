@@ -36,14 +36,14 @@ on port 8080.
 
 ### TCP proxy with TLS
 
-    proxyt -k pem.key -c pem.cert 0.0.0.0:443 10.0.1.234:8080
+    proxyt -s -k pem.key -c pem.cert 0.0.0.0:443 10.0.1.234:8080
 
 Listen on all interfaces on port 443 using TLS and forward incoming requests to
 10.0.1.234 on port 8080.
 
 ### TCP proxy with TLS and advanced options
 
-    proxyt -k pem.key -c pem.cert -i 86400 -H my-host.example.com 0.0.0.0:443 10.0.1.234:8080
+    proxyt -s -k pem.key -c pem.cert -i 86400 -H my-host.example.com 0.0.0.0:443 10.0.1.234:8080
 
 Listen on all interfaces on port 443 using TLS and forward incoming requests to
 10.0.1.234 on port 8080.  Also, reload the cert and key every 86400 seconds
@@ -65,17 +65,18 @@ Usage
       Listen locally via TLS on port 443 (locally) and forward incoming
       requests to 1.2.3.4 on port 5678
 
-        $ proxyt -k pem.key -c pem.cert 127.0.0.1:443 1.2.3.4:5678
+        $ proxyt -s -k pem.key -c pem.cert 127.0.0.1:443 1.2.3.4:5678
 
     Options:
 
-      -c, --cert <cert>       certificate file to use (must be specified with -k)
-      -H, --sni-host <host>   SNI Hostname (optional), connections that do not match will be dropped
+      -c, --cert <cert>       [env PROXYT_CERT] certificate file to use (requires -s)
+      -H, --sni-host <host>   [env PROXYT_SNI_HOST] SNI Hostname (optional), connections that do not match will be dropped
       -h, --help              print this message and exit
-      -i, --interval <secs>   interval in seconds to reload TLS key and cert, defaults to none
-      -k, --key <key>         key file to use (must be specified with -c)
-      -l, --log-level <lvl>   bunyan log level to use, defaults to info
-      -n, --no-dns            do not attempt to resolve IP addresses
+      -i, --interval <secs>   [env PROXYT_INTERVAL] interval in seconds to reload TLS key and cert, defaults to none
+      -k, --key <key>         [env PROXYT_KEY] key file to use (requires -s)
+      -l, --log-level <lvl>   [env PROXYT_LOG_LEVEL] bunyan log level to use, defaults to info
+      -n, --no-dns            [env PROXYT_NO_DNS] do not attempt to resolve IP addresses
+      -s, --use-tls           [env PROXYT_USE_TLS] enable tls, requires -c and -k be set
       -v, --version           print the version number and exit
 
 License
