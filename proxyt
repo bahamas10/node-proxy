@@ -40,13 +40,15 @@ var secureContext;
 var server;
 
 // CLI Options
-var interval;
-var key;
-var cert;
-var reverseDNS = true;
-var SNIHost;
+var SNIHost = process.env.PROXYT_SNI_HOST;
+var cert = process.env.PROXYT_CERT;
+var interval = process.env.PROXYT_INTERVAL;
+var logLevel = process.env.PROXYT_LOG_LEVEL;
+var key = process.env.PROXYT_KEY;
+var reverseDNS = !process.env.PROXYT_NO_DNS;
 var source;
 var target;
+var useTLS = !!process.env.PROXYT_USE_TLS;
 
 // DNS cache
 var dnsCache = new BasicCache({
@@ -75,7 +77,7 @@ var dnsq = vasync.queue(function (ip, cb) {
         // cache the value
         assert.arrayOfString(names, 'names');
         name = names[0] || 'unknown';
-        log.debug({ip: ip, name: name}, 'DNS record for ip %s: %s', ip, name);
+        log.debug({ip: ip, hostname: name}, 'DNS record for ip %s: %s', ip, name);
         dnsCache.set(ip, name);
         cb();
     });
@@ -98,17 +100,18 @@ function usage() {
         '  Listen locally via TLS on port 443 (locally) and forward incoming',
         '  requests to 1.2.3.4 on port 5678',
         '',
-        '    $ proxyt -k pem.key -c pem.cert 127.0.0.1:443 1.2.3.4:5678',
+        '    $ proxyt -s -k pem.key -c pem.cert 127.0.0.1:443 1.2.3.4:5678',
         '',
         'Options:',
         '',
-        '  -c, --cert <cert>       certificate file to use (must be specified with -k)',
-        '  -H, --sni-host <host>   SNI Hostname (optional), connections that do not match will be dropped',
+        '  -c, --cert <cert>       [env PROXYT_CERT] certificate file to use (requires -s)',
+        '  -H, --sni-host <host>   [env PROXYT_SNI_HOST] SNI Hostname (optional), connections that do not match will be dropped',
         '  -h, --help              print this message and exit',
-        '  -i, --interval <secs>   interval in seconds to reload TLS key and cert, defaults to none',
-        '  -k, --key <key>         key file to use (must be specified with -c)',
-        '  -l, --log-level <lvl>   bunyan log level to use, defaults to info',
-        '  -n, --no-dns            do not attempt to resolve IP addresses',
+        '  -i, --interval <secs>   [env PROXYT_INTERVAL] interval in seconds to reload TLS key and cert, defaults to none',
+        '  -k, --key <key>         [env PROXYT_KEY] key file to use (requires -s)',
+        '  -l, --log-level <lvl>   [env PROXYT_LOG_LEVEL] bunyan log level to use, defaults to info',
+        '  -n, --no-dns            [env PROXYT_NO_DNS] do not attempt to resolve IP addresses',
+        '  -s, --use-tls           [env PROXYT_USE_TLS] enable tls, requires -c and -k be set',
         '  -v, --version           print the version number and exit',
         '',
     ].join('\n');
@@ -304,6 +307,7 @@ var options = [
     'k:(key)',
     'l:(log-level)',
     'n(no-dns)',
+    's(use-tls)',
     'v(version)'
 ].join('');
 var parser = new getopt.BasicParser(options, process.argv);
@@ -315,10 +319,11 @@ while ((option = parser.getopt()) !== undefined) {
     case 'c': cert = option.optarg; break;
     case 'H': SNIHost = option.optarg; break;
     case 'h': console.log(usage()); process.exit(0);
-    case 'i': interval = parseInt(option.optarg, 10); assert.number(interval); break;
+    case 'i': interval = option.optarg; break;
     case 'k': key = option.optarg; break;
-    case 'l': log.level(option.optarg); break;
+    case 'l': logLevel = option.optarg; break;
     case 'n': reverseDNS = false; break;
+    case 's': useTLS = true; break;
     case 'v': console.log(package.version); process.exit(0);
     default: console.error(usage()); process.exit(1); break;
     }
@@ -327,13 +332,31 @@ var args = process.argv.slice(parser.optind());
 source = extractHostAndPort(args[0], 'source');
 target = extractHostAndPort(args[1], 'target');
 
+if (interval) {
+    interval = parseInt(interval, 10);
+    assert.number(interval, 'interval');
+}
+
+if (logLevel) {
+    log.level(logLevel);
+}
+
+if ((cert || key) && !useTLS) {
+    usageError('-k and -c require -s');
+}
+
+if (useTLS && !cert) {
+    usageError('-c must be specified with -s');
+}
+
+if (useTLS && !key) {
+    usageError('-k must be specified with -s');
+}
+
 // -k and -c must both be specified or none specified
 if ((cert && !key) || (!cert && key)) {
     usageError('-k and -c must be specified together');
 }
-
-var useTLS = !!(cert && key);
-var server;
 
 if (!useTLS && interval) {
     usageError('-i must be specified with -c and -k');
