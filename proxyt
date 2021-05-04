@@ -77,7 +77,7 @@ var dnsq = vasync.queue(function (ip, cb) {
         // cache the value
         assert.arrayOfString(names, 'names');
         name = names[0] || 'unknown';
-        log.debug({ip: ip, hostname: DNSname}, 'DNS record for ip %s: %s', ip, name);
+        log.debug({ip: ip, DNSName: name}, 'DNS record for ip %s: %s', ip, name);
         dnsCache.set(ip, name);
         cb();
     });
